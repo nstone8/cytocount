@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ciborium = "0.2.2"
+clap = { version = "4.5.14", features = ["derive"] }
 imageproc = "0.25.0"
 papillae = { git = "https://github.com/nstone8/papillae", version = "0.1.9" }
 recbudd = { git = "https://github.com/nstone8/recbudd", version = "0.1.4" }

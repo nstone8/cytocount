@@ -3,7 +3,7 @@ use imageproc::{image,
 		definitions::Image,
 		map::map_pixels,
 		contrast::{threshold,ThresholdType}};
-use image::{ImageBuffer,Pixel,GrayImage,imageops::overlay,Luma,Primitive};
+use image::{ImageBuffer,Pixel,GrayImage,imageops::overlay};
 use std::ops::Deref;
 
 ///helper function for making debug images
@@ -21,27 +21,39 @@ where P:Pixel, C:Deref<Target = [P::Subpixel]>{
 }
 
 ///subtract one image from another (useful for removing background).
-///`image_diff(a,b)` performs `a-b`
-pub fn image_diff<T>(a:&Image<Luma<T>>, b:&Image<Luma<T>>) -> Image<Luma<T>>
-where T:Primitive{
+///`image_diff(a,b)` performs `abs(a-b)`
+fn image_diff(a:&GrayImage, b:&GrayImage) -> GrayImage{
     map_pixels(a,|x,y,p| {
 	//indexing gets us the primitive (numeric value).
-	let raw_value = p[0] - b.get_pixel(x,y)[0];
+	let raw_value: i32 = (p[0] as i32) - (b.get_pixel(x,y)[0] as i32);
+	//println!("{} - {} = {}",p[0],b.get_pixel(x,y)[0],raw_value);
+	let abs_value : u8 = raw_value.abs().try_into().unwrap();
 	//a one length array of T implements Into<Luma<T>>
-	[raw_value].into()
+	[abs_value].into()
     })
 }
 
-///Detect dark objects on a light background
-fn find_objects(bg:&GrayImage,f:&GrayImage,blur:f32,threshold_value:u8) -> GrayImage{
+/*
+///"invert" image (make light areas dark and vice versa)
+fn inv_image(im:&GrayImage) -> GrayImage{
+    map_pixels(im, |_,_,p| {
+	[255 - p[0]].into()
+    })
+}
+*/
+///Detect objects
+pub fn find_objects(bg:&GrayImage,f:&GrayImage,blur:f32,threshold_value:u8) -> GrayImage{
+    //invert our inputs
+    //let bg = inv_image(bg);
+    //let f = inv_image(f);
     //subtract off the background
-    let diff = image_diff(f,bg);
+    let diff = image_diff(&f,&bg);
     //first do a blur to reduce noise
-    let blurred = gaussian_blur_f32(f,blur);
+    let blurred = gaussian_blur_f32(&diff,blur);
     //now threshold
     let thresh = threshold(&blurred,threshold_value,ThresholdType::Binary);
     //filter small objects
 
     //extract coordinates of object centroids
-    hcat_image(&[f,&diff,&blurred,&thresh])
+    hcat_image(&[&f,&bg,&diff,&blurred,&thresh])
 }
