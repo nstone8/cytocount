@@ -8,6 +8,9 @@ use imageproc::{
     map::map_pixels,
     rgb_image,
 };
+use itertools::Itertools;
+use linreg::linear_regression_of;
+use polars::prelude::{df, DataFrame};
 use std::collections::HashMap;
 use std::ops::Deref;
 
@@ -70,8 +73,11 @@ impl DetectedObject {
         self.sum_x += x as u64;
         self.sum_y += y as u64;
     }
-    fn get_centroid(&self) -> (u64, u64) {
-        (self.sum_x / self.num_pix, self.sum_y / self.num_pix)
+    fn get_centroid(&self) -> (u32, u32) {
+        (
+            (self.sum_x / self.num_pix).try_into().unwrap(),
+            (self.sum_y / self.num_pix).try_into().unwrap(),
+        )
     }
 }
 
@@ -91,14 +97,15 @@ fn red_box() -> RgbImage {
     )
 }
 
-///Detect objects
+///Detect objects. This function returns a tuple where the first entry is a `Vec` of object centroids and
+///the second entry is an image showing the various phases of the image processing.
 pub fn find_objects(
     bg: &GrayImage,
     f: &GrayImage,
     blur: f32,
     threshold_value: u8,
     min_obj_area: u64,
-) -> RgbImage {
+) -> (RgbImage, Vec<(u32, u32)>) {
     //invert our inputs
     //let bg = inv_image(bg);
     //let f = inv_image(f);
@@ -131,18 +138,18 @@ pub fn find_objects(
         }
     }
     //extract coordinates of object centroids
-    let mut centroids = Vec::<(u64, u64)>::new();
+    let mut centroids = Vec::<_>::new();
     for (_, v) in objs.iter() {
         if v.num_pix >= min_obj_area.into() {
             centroids.push(v.get_centroid())
         }
     }
-    println!("centroid list: {:?}", centroids);
+    //println!("centroid list: {:?}", centroids);
     let debug_im =
         DynamicImage::ImageLuma8(hcat_image(&[&f, &bg, &diff, &blurred, &thresh])).into_rgb8();
     let mut labeled_im = DynamicImage::ImageLuma8(f.clone()).into_rgb8();
     let rb = red_box();
-    for c in centroids {
+    for c in centroids.iter() {
         overlay(
             &mut labeled_im,
             &rb,
@@ -150,5 +157,140 @@ pub fn find_objects(
             c.1.try_into().unwrap(),
         );
     }
-    hcat_image(&[&debug_im, &labeled_im])
+    return (hcat_image(&[&debug_im, &labeled_im]), centroids);
+}
+
+///Struct representing the coordinates of a detected object
+pub struct ObjCoords {
+    pub x: u32,
+    pub y: u32,
+    pub t: f32,
+}
+
+///Convert a list of [ObjCoords] into a [DataFrame]
+pub fn coords_to_df(oc: &[ObjCoords]) -> DataFrame {
+    let x: Vec<_> = oc.iter().map(|o| o.x).collect();
+    let y: Vec<_> = oc.iter().map(|o| o.y).collect();
+    let t: Vec<_> = oc.iter().map(|o| o.t).collect();
+    df!("x" => x, "y" => y, "t" => t).unwrap()
+}
+
+///Struct representing the path taken by an Object
+pub struct ObjPath {
+    path: Vec<ObjCoords>,
+}
+
+///Enum to help us remember if a point has been added to a path or not
+pub enum PathStatus {
+    OnPath(ObjCoords),
+    OffPath(ObjCoords),
+}
+
+///Struct for organizing regression results
+struct RegResult {
+    slope: f64,
+    intercept: f64,
+    rms_error: f64,
+    max_error: f64,
+}
+
+///Divide a set of [ObjCoords] into paths. This function assumes the objects are not moving purely horizontally.
+///This function will modify the input object list to mark the objects successfully added to paths
+///# Arguments
+///- `min_points` is the minimum number of coordinates along a path (i.e. how many times we expect to catch an object).
+///- `time_window` is the amount forward in time to check for initial path construction.
+///- `tolerance` is the error allowed (per point) to be considered on our (linear) path
+pub fn track_paths(
+    objs: &mut Vec<PathStatus>,
+    min_points: usize,
+    time_window: f32,
+    tolerance: f32,
+) -> Vec<ObjPath> {
+    //create a Vec<ObjPath> to store our paths in
+    let mut paths = Vec::<ObjPath>::new();
+    let mut cur_index = 0;
+    while cur_index < objs.len() {
+        if let PathStatus::OffPath(first_point) = &objs[cur_index] {
+            //if the first point remaining in objs is OnPath we don't need to worry about it
+            //find the last index inside our time_window
+            let mut win_max: usize = cur_index;
+            for i in cur_index..objs.len() {
+                let o = match &objs[i] {
+                    PathStatus::OnPath(o) => o,
+                    PathStatus::OffPath(o) => o,
+                };
+                if (o.t - first_point.t) <= time_window {
+                    //this point is inside the window
+                    win_max = i;
+                } else {
+                    break;
+                }
+            }
+            //now, for all unique combinations of objects in our window, which `min_points` set of objects is in the straightest line?
+            let mut i_combos: Vec<_> = ((cur_index + 1)..win_max)
+                .filter(|i| {
+                    //only interested in points not already on a path
+                    match objs[*i] {
+                        PathStatus::OffPath(_) => true,
+                        PathStatus::OnPath(_) => false,
+                    }
+                })
+                .combinations(min_points)
+                .collect();
+            //To be the same cell, all of the timestamps on each of the frames must be different.
+            i_combos = i_combos
+                .into_iter()
+                .filter(|c| {
+                    //get the timestamps of each frame
+                    let mut t_vec: Vec<_> = c
+                        .iter()
+                        .map(|i| {
+                            //need to unwrap our ObjCoords object
+                            let PathStatus::OffPath(o) = &objs[*i] else {
+                                panic!("we should have removed all OnPath entries");
+                            };
+                            o.t
+                        })
+                        .collect();
+                    //I think t_vec should be sorted, but we're going to sort it anyways
+                    //we need this partial_cmp shenanigans because floats can be NaN and they therefore implement PartialOrd rather than Ord
+                    t_vec.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                    //our goal here is to check for duplicates. if the length changes after dedup, some of these frames are duplicates and we don't want this combo
+                    let old_len = t_vec.len();
+                    t_vec.dedup();
+                    //if this is false, filter will drop this combination
+                    old_len == t_vec.len()
+                })
+                .collect();
+            //fit a linear model to each set of points in i_combos, and choose the one with the lowest error
+            //we will map i_combos into a vec of tuples. the first entry will be the error of the fit, the second will be the fit, the third will be the combos
+            let fits: Vec<_> = i_combos
+                .into_iter()
+                .map(|c| {
+                    let coords: Vec<_> = c
+                        .iter()
+                        .map(|i| {
+                            //i is a reference to the index in objs corresponding to this object. we want to return a (y,x) tuple for the regression
+                            //we are changing the order of x and y so our slopes are close to zero instead of infinity if the cells are flowing up-down
+                            let PathStatus::OffPath(o) = &objs[*i] else {
+                                panic!("we should have removed all OnPath entries");
+                            };
+                            (
+                                TryInto::<f64>::try_into(o.y).unwrap(),
+                                TryInto::<f64>::try_into(o.x).unwrap(),
+                            )
+                        })
+                        .collect();
+                    let (slope, intercept): (f64, f64) =
+                        linear_regression_of(&coords).expect("regression failed");
+                    //pick up here
+                    //calculate the error for each point
+                    //aggregate to rms error
+                })
+                .collect();
+        }
+        cur_index += 1;
+    }
+    //return our results
+    return paths;
 }

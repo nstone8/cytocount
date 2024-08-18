@@ -1,8 +1,9 @@
 use ciborium;
 use clap::Parser;
-use cytocount::find_objects;
+use cytocount::{coords_to_df, find_objects, ObjCoords};
 use imageproc::map::map_pixels;
 use papillae::ralston;
+use polars::prelude::{CsvWriter, SerWriter};
 use ralston::image::{ImageBuffer, Luma};
 use recbudd;
 use std::fs::{DirBuilder, File};
@@ -61,11 +62,27 @@ fn main() {
     let mut framenum = 1;
     //loop here to process and save the frames
     println!("processing frames");
+    let mut oc = Vec::<ObjCoords>::new();
     for im in frame_vec {
         let mut im_path = dir.clone();
         im_path.push(format!("{}.png", framenum));
         framenum += 1;
-        let proc = find_objects(&bg, &im, args.blur, args.threshold, args.min_area);
+        let (proc, cent_vec) = find_objects(&bg, &im, args.blur, args.threshold, args.min_area);
         proc.save(im_path).expect("couldn't save image");
+        let mut o: Vec<ObjCoords> = cent_vec
+            .into_iter()
+            .map(|c| ObjCoords {
+                x: c.0,
+                y: c.1,
+                t: framenum as f32,
+            })
+            .collect();
+        oc.append(&mut o);
     }
+    let mut df = coords_to_df(&oc);
+    let mut df_path = dir.clone();
+    df_path.push("centroids.csv");
+    let df_file = File::create(df_path).unwrap();
+    let mut cw = CsvWriter::new(df_file);
+    cw.finish(&mut df).unwrap();
 }
