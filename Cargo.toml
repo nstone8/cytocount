@@ -8,7 +8,7 @@ ciborium = "0.2.2"
 clap = { version = "4.5.14", features = ["derive"] }
 imageproc = "0.25.0"
 itertools = "0.13.0"
-linreg = "0.2.0"
+moore_penrose = { git = "https://github.com/nstone8/moore_penrose", version = "0.1.0" }
 papillae = { git = "https://github.com/nstone8/papillae", version = "0.1.9" }
 polars = "0.41.3"
-recbudd = { git = "https://github.com/nstone8/recbudd", version = "0.1.4" }
+recbudd = { git = "https://github.com/nstone8/recbudd", version = "0.2.0" }

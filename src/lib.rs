@@ -9,8 +9,9 @@ use imageproc::{
     rgb_image,
 };
 use itertools::Itertools;
-use linreg::linear_regression_of;
+use moore_penrose::{pinv, Dim, Dyn, OMatrix};
 use polars::prelude::{df, DataFrame};
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ops::Deref;
 
@@ -161,6 +162,7 @@ pub fn find_objects(
 }
 
 ///Struct representing the coordinates of a detected object
+#[derive(Debug)]
 pub struct ObjCoords {
     pub x: u32,
     pub y: u32,
@@ -176,6 +178,7 @@ pub fn coords_to_df(oc: &[ObjCoords]) -> DataFrame {
 }
 
 ///Struct representing the path taken by an Object
+#[derive(Debug)]
 pub struct ObjPath {
     path: Vec<ObjCoords>,
 }
@@ -187,10 +190,11 @@ pub enum PathStatus {
 }
 
 ///Struct for organizing regression results
+#[derive(Debug)]
 struct RegResult {
-    slope: f64,
-    intercept: f64,
-    rms_error: f64,
+    v1: f64,
+    v2: f64,
+    //rms_error: f64,
     max_error: f64,
 }
 
@@ -210,11 +214,29 @@ pub fn track_paths(
     let mut paths = Vec::<ObjPath>::new();
     let mut cur_index = 0;
     while cur_index < objs.len() {
+        println!("cur_index: {}/{}", cur_index, objs.len());
         if let PathStatus::OffPath(first_point) = &objs[cur_index] {
-            //if the first point remaining in objs is OnPath we don't need to worry about it
+            //if first_point is OnPath we don't need to worry about it
+            //find the first index of our time_window (i.e., the first object to
+            //have a timestamp greater than the object at cur_index
+            let mut win_min: usize = cur_index + 1;
+            for i in cur_index..objs.len() {
+                let o = match &objs[i] {
+                    PathStatus::OnPath(o) => o,
+                    PathStatus::OffPath(o) => o,
+                };
+                if o.t == first_point.t {
+                    //this point can't be our object as it's visible in the same frame
+                    cur_index += 1;
+                    continue;
+                } else {
+                    win_min = i;
+                    break;
+                }
+            }
             //find the last index inside our time_window
             let mut win_max: usize = cur_index;
-            for i in cur_index..objs.len() {
+            for i in win_min..objs.len() {
                 let o = match &objs[i] {
                     PathStatus::OnPath(o) => o,
                     PathStatus::OffPath(o) => o,
@@ -227,7 +249,7 @@ pub fn track_paths(
                 }
             }
             //now, for all unique combinations of objects in our window, which `min_points` set of objects is in the straightest line?
-            let mut i_combos: Vec<_> = ((cur_index + 1)..win_max)
+            let mut i_combos: Vec<_> = (win_min..win_max)
                 .filter(|i| {
                     //only interested in points not already on a path
                     match objs[*i] {
@@ -235,8 +257,10 @@ pub fn track_paths(
                         PathStatus::OnPath(_) => false,
                     }
                 })
-                .combinations(min_points)
+                //our point of interest counts as one
+                .combinations(min_points - 1)
                 .collect();
+            //println!("i_combos before filter {:?}", i_combos);
             //To be the same cell, all of the timestamps on each of the frames must be different.
             i_combos = i_combos
                 .into_iter()
@@ -263,34 +287,87 @@ pub fn track_paths(
                 })
                 .collect();
             //fit a linear model to each set of points in i_combos, and choose the one with the lowest error
-            //we will map i_combos into a vec of tuples. the first entry will be the error of the fit, the second will be the fit, the third will be the combos
-            let fits: Vec<_> = i_combos
+            //println!("i_combos after filter {:?}", i_combos);
+            //we will map i_combos into a vec of RegResult
+            let mut fits: Vec<_> = i_combos
                 .into_iter()
                 .map(|c| {
                     let coords: Vec<_> = c
                         .iter()
                         .map(|i| {
-                            //i is a reference to the index in objs corresponding to this object. we want to return a (y,x) tuple for the regression
-                            //we are changing the order of x and y so our slopes are close to zero instead of infinity if the cells are flowing up-down
+                            //i is a reference to the index in objs corresponding to this object.
+                            //we want to return a (t,x,y) tuple for the regression but normalized
+                            //to first_point (i.e. with t0, x0 and y0 subtracted off
                             let PathStatus::OffPath(o) = &objs[*i] else {
                                 panic!("we should have removed all OnPath entries");
                             };
                             (
-                                TryInto::<f64>::try_into(o.y).unwrap(),
-                                TryInto::<f64>::try_into(o.x).unwrap(),
+                                TryInto::<f64>::try_into(o.t - first_point.t).unwrap(),
+                                TryInto::<f64>::try_into(o.x - first_point.x).unwrap(),
+                                TryInto::<f64>::try_into(o.y - first_point.y).unwrap(),
                             )
                         })
                         .collect();
-                    let (slope, intercept): (f64, f64) =
-                        linear_regression_of(&coords).expect("regression failed");
-                    //pick up here
-                    //calculate the error for each point
-                    //aggregate to rms error
+                    //build matrices for our least squares fit
+                    //this will be a column vector of the timestamps
+                    let nrows = coords.len();
+                    let t: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
+                        Dim::from_usize(nrows),
+                        Dim::from_usize(1),
+                        coords.clone().into_iter().map(|r| r.0),
+                    );
+                    let mut x: Vec<_> = coords.clone().into_iter().map(|r| r.1).collect();
+                    let mut y: Vec<_> = coords.clone().into_iter().map(|r| r.2).collect();
+                    //we want a matrix with x as the first column and y as the second
+                    x.append(&mut y);
+                    let xy_mat: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
+                        Dim::from_usize(nrows),
+                        Dim::from_usize(2),
+                        x.into_iter(),
+                    );
+                    //now we can get our fit parameters v1 and v2 as a row vector by multiplying
+                    //pinv(t) by xy_mat
+                    let v_mat = pinv(t.clone()) * xy_mat.clone();
+                    //check that this is the correct size
+                    assert!(v_mat.nrows() == 1, "v_mat should be 1x2");
+                    assert!(v_mat.ncols() == 2, "v_mat should be 1x2");
+                    //grab our components
+                    let v1 = v_mat[(0, 0)];
+                    let v2 = v_mat[(0, 1)];
+                    //we can now calculate the per-point error
+                    let err_mat: OMatrix<f64, Dyn, Dyn> = xy_mat - t * v_mat;
+                    //per point l2 norm (distance)
+                    let l2_err: Vec<_> = err_mat
+                        .row_iter()
+                        .map(|r| (r[(0, 0)].powi(2) + r[(0, 1)].powi(2)).sqrt())
+                        .collect();
+                    let max_error = l2_err.into_iter().reduce(|e1, e2| e1.max(e2)).unwrap();
+                    //let rms_error:f64 = l2_err.clone().into_iter().sum();
+
+                    RegResult { v1, v2, max_error }
                 })
                 .collect();
+            fits.sort_by(|p1, p2| {
+                if p1.max_error < p2.max_error {
+                    Ordering::Less
+                } else if p1.max_error < p2.max_error {
+                    Ordering::Greater
+                } else {
+                    Ordering::Equal
+                }
+            });
+            if fits.len() == 0 {
+                cur_index += 1;
+                continue;
+            }
+            if fits[0].max_error < tolerance.into() {
+                //pick up here. take the best fit, attempt to extend it, and add it to our output
+                println!("found fit: {:?}", fits[0])
+            }
         }
         cur_index += 1;
     }
+
     //return our results
     return paths;
 }

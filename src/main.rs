@@ -1,6 +1,6 @@
 use ciborium;
 use clap::Parser;
-use cytocount::{coords_to_df, find_objects, ObjCoords};
+use cytocount::{coords_to_df, find_objects, track_paths, ObjCoords, PathStatus};
 use imageproc::map::map_pixels;
 use papillae::ralston;
 use polars::prelude::{CsvWriter, SerWriter};
@@ -15,6 +15,9 @@ struct MyArgs {
     blur: f32,
     threshold: u8,
     min_area: u64,
+    min_frames: usize,
+    time_window: f32,
+    tolerance: f32,
 }
 
 fn main() {
@@ -85,4 +88,13 @@ fn main() {
     let df_file = File::create(df_path).unwrap();
     let mut cw = CsvWriter::new(df_file);
     cw.finish(&mut df).unwrap();
+
+    let mut objs_pathstatus: Vec<PathStatus> =
+        oc.into_iter().map(|o| PathStatus::OffPath(o)).collect();
+    let _ = track_paths(
+        &mut objs_pathstatus,
+        args.min_frames,
+        args.time_window,
+        args.tolerance,
+    );
 }
