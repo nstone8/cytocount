@@ -162,7 +162,7 @@ pub fn find_objects(
 }
 
 ///Struct representing the coordinates of a detected object
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ObjCoords {
     pub x: u32,
     pub y: u32,
@@ -183,7 +183,27 @@ pub struct ObjPath {
     path: Vec<ObjCoords>,
 }
 
+impl ObjPath {
+    ///Create a new `ObjPath`
+    pub fn new() -> Self {
+        ObjPath {
+            path: Vec::<ObjCoords>::new(),
+        }
+    }
+
+    ///Add a point to this path
+    pub fn push(&mut self, point: ObjCoords) {
+        self.path.push(point);
+    }
+
+    ///Consume this object to get the underlying vector
+    pub fn into_vec(self) -> Vec<ObjCoords> {
+        self.path
+    }
+}
+
 ///Enum to help us remember if a point has been added to a path or not
+#[derive(Clone)]
 pub enum PathStatus {
     OnPath(ObjCoords),
     OffPath(ObjCoords),
@@ -198,7 +218,7 @@ struct RegResult {
     max_error: f64,
 }
 
-///Divide a set of [ObjCoords] into paths. This function assumes the objects are not moving purely horizontally.
+///Divide a set of [ObjCoords] into paths and append them to `paths`
 ///This function will modify the input object list to mark the objects successfully added to paths
 ///# Arguments
 ///- `min_points` is the minimum number of coordinates along a path (i.e. how many times we expect to catch an object).
@@ -206,16 +226,14 @@ struct RegResult {
 ///- `tolerance` is the error allowed (per point) to be considered on our (linear) path
 pub fn track_paths(
     objs: &mut Vec<PathStatus>,
+    paths: &mut Vec<ObjPath>,
     min_points: usize,
     time_window: f32,
     tolerance: f32,
-) -> Vec<ObjPath> {
-    //create a Vec<ObjPath> to store our paths in
-    let mut paths = Vec::<ObjPath>::new();
+) {
     let mut cur_index = 0;
     while cur_index < objs.len() {
-        println!("cur_index: {}/{}", cur_index, objs.len());
-        if let PathStatus::OffPath(first_point) = &objs[cur_index] {
+        if let PathStatus::OffPath(first_point) = objs[cur_index].clone() {
             //if first_point is OnPath we don't need to worry about it
             //find the first index of our time_window (i.e., the first object to
             //have a timestamp greater than the object at cur_index
@@ -361,13 +379,35 @@ pub fn track_paths(
                 continue;
             }
             if fits[0].max_error < tolerance.into() {
-                //pick up here. take the best fit, attempt to extend it, and add it to our output
-                println!("found fit: {:?}", fits[0])
+                //Take the best fit, attempt to extend it, and add it to our output
+                let best_fit = &fits[0];
+                //create a new ObjPath to store everything in
+                let mut this_path = ObjPath::new();
+                //mark first_point as OnPath and add to this_path
+                objs[cur_index] = PathStatus::OnPath(first_point.clone());
+                this_path.push(first_point.clone());
+                //check all remaining points which are OffPath to see if they lie on this fit
+                for inner_index in cur_index + 1..objs.len() {
+                    if let PathStatus::OffPath(p) = objs[inner_index].clone() {
+                        //calculate where our fit would place a point at p.t
+                        let t_prime = Into::<f64>::into(p.t - first_point.t);
+                        let pred_x = Into::<f64>::into(first_point.x) + best_fit.v1 * t_prime;
+                        let pred_y = Into::<f64>::into(first_point.y) + best_fit.v2 * t_prime;
+                        //calculate the error in terms of distance
+                        let err = ((pred_x - Into::<f64>::into(p.x)).powi(2)
+                            + (pred_y - Into::<f64>::into(p.y)).powi(2))
+                        .sqrt();
+                        //if this error is less than our tolerance, add this point to our paths
+                        //and mark it as OnPath
+                        if err < tolerance.into() {
+                            objs[inner_index] = PathStatus::OnPath(p.clone());
+                            this_path.push(p);
+                        }
+                    }
+                }
+                paths.push(this_path);
             }
         }
         cur_index += 1;
     }
-
-    //return our results
-    return paths;
 }

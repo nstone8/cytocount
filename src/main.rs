@@ -1,6 +1,6 @@
 use ciborium;
 use clap::Parser;
-use cytocount::{coords_to_df, find_objects, track_paths, ObjCoords, PathStatus};
+use cytocount::{coords_to_df, find_objects, track_paths, ObjCoords, ObjPath, PathStatus};
 use imageproc::map::map_pixels;
 use papillae::ralston;
 use polars::prelude::{CsvWriter, SerWriter};
@@ -91,10 +91,13 @@ fn main() {
 
     let mut objs_pathstatus: Vec<PathStatus> =
         oc.into_iter().map(|o| PathStatus::OffPath(o)).collect();
+    let mut paths = Vec::<ObjPath>::new();
     let _ = track_paths(
         &mut objs_pathstatus,
+        &mut paths,
         args.min_frames,
         args.time_window,
         args.tolerance,
     );
+    println!("paths: {:?}", paths);
 }
