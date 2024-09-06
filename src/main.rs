@@ -70,8 +70,9 @@ fn main() {
         let mut im_path = dir.clone();
         im_path.push(format!("{}.png", framenum));
         framenum += 1;
-        let (proc, cent_vec) = find_objects(&bg, &im, args.blur, args.threshold, args.min_area);
-        proc.save(im_path).expect("couldn't save image");
+        let (proc, cent_vec) =
+            find_objects(&bg, &im, args.blur, args.threshold, args.min_area, true);
+        proc.unwrap().save(im_path).expect("couldn't save image");
         let mut o: Vec<ObjCoords> = cent_vec
             .into_iter()
             .map(|c| ObjCoords {

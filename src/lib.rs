@@ -1,4 +1,4 @@
-use image::{imageops::overlay, DynamicImage, GrayImage, ImageBuffer, Pixel, RgbImage};
+use image::{imageops::overlay, DynamicImage, GrayImage, ImageBuffer, Pixel, RgbaImage};
 use imageproc::region_labelling::{connected_components, Connectivity};
 use imageproc::{
     contrast::{threshold, ThresholdType},
@@ -6,14 +6,16 @@ use imageproc::{
     filter::gaussian_blur_f32,
     image,
     map::map_pixels,
-    rgb_image,
 };
 use itertools::Itertools;
 use moore_penrose::{pinv, Dim, Dyn, OMatrix};
 use polars::prelude::{df, DataFrame};
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fs::{DirBuilder, File};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::ops::Deref;
+use std::path::PathBuf;
 
 ///helper function for making debug images
 pub fn hcat_image<P, C>(v: &[&ImageBuffer<P, C>]) -> Image<P>
@@ -82,6 +84,7 @@ impl DetectedObject {
     }
 }
 
+/*
 ///Draw a 10x10 red box
 fn red_box() -> RgbImage {
     rgb_image!(
@@ -97,16 +100,84 @@ fn red_box() -> RgbImage {
     [255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0],[255,0,0]
     )
 }
+*/
 
-///Detect objects. This function returns a tuple where the first entry is a `Vec` of object centroids and
-///the second entry is an image showing the various phases of the image processing.
+///Draw a line with `line_weight` from pixel `a` to `b` filled with rgb color `c` on a transparent
+///background with `width` and `height`
+fn line_overlay(
+    width: u32,
+    height: u32,
+    a: [u32; 2],
+    b: [u32; 2],
+    line_weight: u32,
+    c: [u8; 3],
+) -> RgbaImage {
+    //vector from a to b
+    let v: Vec<f64> = a
+        .iter()
+        .zip(b.iter())
+        .map(|coords| (coords.1 - coords.0).into())
+        .collect();
+    //vector normal to v
+    let n = [-v[1], v[0]];
+    //magnitude of n
+    let mag_n: f64 = (n[0].powi(2) + n[1].powi(2)).sqrt();
+    //little helper closure
+    let point_on_line = |x: f64, y: f64| {
+        //vector from a to our point
+        let v_p = [x - (a[0] as f64), y - (a[1] as f64)];
+        //distance from our line to (x,y) is abs((v_p⋅n)/mag_n)
+        let dot_prod: f64 = v_p[0] * n[0] + v_p[1] * n[1];
+        let dist = (dot_prod / mag_n).abs();
+        if dist > line_weight.into() {
+            false
+        } else {
+            true
+        }
+    };
+
+    RgbaImage::from_fn(width, height, |x, y| {
+        if point_on_line(x.into(), y.into()) {
+            //return an opaque pixel with color c
+            [c[1], c[2], c[3], 255].into()
+        } else {
+            //return a transparent pixel
+            [0, 0, 0, 0].into()
+        }
+    })
+}
+
+///Draw a circle at 'center' with radius `r` filled with rgb color `c` on a transparent background
+///with `width` and `height`
+fn circle_overlay(width: u32, height: u32, r: u32, center: [u32; 2], c: [u8; 3]) -> RgbaImage {
+    let point_in_circle = |x: f64, y: f64| {
+        let v: [f64; 2] = [x - (center[0] as f64), y - (center[1] as f64)];
+        let dist = (v[0].powi(2) + v[1].powi(2)).sqrt();
+        dist <= r.into()
+    };
+
+    RgbaImage::from_fn(width, height, |x, y| {
+        if point_in_circle(x.into(), y.into()) {
+            //return an opaque pixel with color c
+            [c[1], c[2], c[3], 255].into()
+        } else {
+            //return a transparent pixel
+            [0, 0, 0, 0].into()
+        }
+    })
+}
+
+///Detect objects. This function returns a tuple where the the first entry is an `Option`al image
+///showing the various phases of the image processing and the second entry is a `Vec` of object
+///centroids.
 pub fn find_objects(
     bg: &GrayImage,
     f: &GrayImage,
     blur: f32,
     threshold_value: u8,
     min_obj_area: u64,
-) -> (RgbImage, Vec<(u32, u32)>) {
+    build_debug_image: bool,
+) -> (Option<RgbaImage>, Vec<(u32, u32)>) {
     //invert our inputs
     //let bg = inv_image(bg);
     //let f = inv_image(f);
@@ -146,19 +217,25 @@ pub fn find_objects(
         }
     }
     //println!("centroid list: {:?}", centroids);
-    let debug_im =
-        DynamicImage::ImageLuma8(hcat_image(&[&f, &bg, &diff, &blurred, &thresh])).into_rgb8();
-    let mut labeled_im = DynamicImage::ImageLuma8(f.clone()).into_rgb8();
-    let rb = red_box();
-    for c in centroids.iter() {
-        overlay(
-            &mut labeled_im,
-            &rb,
-            c.0.try_into().unwrap(),
-            c.1.try_into().unwrap(),
-        );
-    }
-    return (hcat_image(&[&debug_im, &labeled_im]), centroids);
+    let output_im = if build_debug_image {
+        let debug_im =
+            DynamicImage::ImageLuma8(hcat_image(&[&f, &bg, &diff, &blurred, &thresh])).into_rgba8();
+        let mut labeled_im = DynamicImage::ImageLuma8(f.clone()).into_rgba8();
+        let im_h = labeled_im.height();
+        let im_w = labeled_im.width();
+        for c in centroids.iter() {
+            overlay(
+                &mut labeled_im,
+                &circle_overlay(im_w, im_h, 10, [c.0, c.1], [255, 0, 0]),
+                0,
+                0,
+            );
+        }
+        Some(hcat_image(&[&debug_im, &labeled_im]))
+    } else {
+        None
+    };
+    return (output_im, centroids);
 }
 
 ///Struct representing the coordinates of a detected object
@@ -409,5 +486,146 @@ pub fn track_paths(
             }
         }
         cur_index += 1;
+    }
+}
+
+const COLOR_PALETTE: [[u8; 3]; 5] = [
+    [100, 143, 255],
+    [254, 97, 0],
+    [120, 94, 240],
+    [255, 176, 0],
+    [220, 38, 127],
+];
+
+///Build debug output when provided a .recbudd file containing the image data, a directory to store
+///the output, and the arguments to [find_objects] and [track_paths]
+pub fn debug_images(
+    recbudd_path: PathBuf,
+    out_dir: PathBuf,
+    //find_objects args
+    bg: &GrayImage,
+    blur: f32,
+    threshold_value: u8,
+    min_obj_area: u64,
+    //track_paths args
+    min_points: usize,
+    time_window: f32,
+    tolerance: f32,
+) {
+    //create our output directory
+    let b = DirBuilder::new();
+    b.create(&out_dir)
+        .expect("couldn't create output directory");
+    //open our recbudd file
+    let f = File::open(&recbudd_path).expect("couldn't open file");
+    let mut reader = BufReader::new(f);
+    let mut oc = Vec::<ObjCoords>::new();
+    loop {
+        match ciborium::from_reader::<recbudd::RecFrame, &mut BufReader<File>>(&mut reader) {
+            Ok(rec_frame) => {
+                let timestamp = rec_frame.get_timestamp();
+                let im = rec_frame.to_image().into_luma8();
+                let (proc, cent_vec) =
+                    find_objects(bg, &im, blur, threshold_value, min_obj_area, false);
+                let mut o: Vec<ObjCoords> = cent_vec
+                    .into_iter()
+                    .map(|c| ObjCoords {
+                        x: c.0,
+                        y: c.1,
+                        t: timestamp,
+                    })
+                    .collect();
+                oc.append(&mut o);
+            }
+            Err(_) => {
+                break;
+            }
+        }
+    }
+    //track our paths
+    let mut objs_pathstatus: Vec<PathStatus> =
+        oc.into_iter().map(|o| PathStatus::OffPath(o)).collect();
+    let mut paths = Vec::<ObjPath>::new();
+    track_paths(
+        &mut objs_pathstatus,
+        &mut paths,
+        min_points,
+        time_window,
+        tolerance,
+    );
+    //rewind our recbudd buffer so we can run through again
+    reader
+        .seek(SeekFrom::Start(0))
+        .expect("couldn't rewind recbudd file");
+    //now we will reprocess our frames, this time we will build debug output
+    //we want a frame number
+    let mut framenum = 1;
+    loop {
+        match ciborium::from_reader::<recbudd::RecFrame, &mut BufReader<File>>(&mut reader) {
+            Ok(rec_frame) => {
+                let timestamp = rec_frame.get_timestamp();
+                //we want a luma8 for processing and an rgba for labeling
+                let im_dyn = rec_frame.to_image();
+                let im = im_dyn.clone().into_luma8();
+                let mut label_im = im_dyn.into_rgba8();
+                let (proc, _) =
+                    find_objects(bg, &im, blur, threshold_value, min_obj_area, true);
+		//now we want to generate a new overlay on label_im which shows all the paths
+		//which are 'live' during this time
+		let live_path_indices = (0..paths.len()).filter(|i| {
+		    let this_path = &paths[*i];
+		    //test if this path contains points which occur at or before `timestamp`
+		    let starts_before = (*this_path).path.iter().any(|c| {
+			c.t < timestamp
+		    });
+		    //test if this path contains points which occur at or after `timestamp`
+		    let ends_after = (*this_path).path.iter().any(|c| {
+			c.t > timestamp
+		    });
+		    //this path is 'live' if...
+		    starts_before && ends_after
+		});
+		//now, for each live path, we want to draw points and lines connecting all
+		//coordinates that have happened up until now
+		let im_width = label_im.width();
+		let im_height = label_im.height();
+		for path_index in live_path_indices {
+		    //alternate what color we use
+		    let line_color = COLOR_PALETTE[path_index % COLOR_PALETTE.len()];
+		    let coords:Vec<_> = paths[path_index].path
+			.iter().filter(|coord| coord.t <= timestamp).collect();
+		    if coords.len()<1 {
+			//nothing to draw
+			continue
+		    }
+		    //draw the first point
+		    overlay(&mut label_im,&circle_overlay(im_width,im_height,10,
+							[coords[0].x,coords[0].y],line_color),0,0);
+		    if coords.len() < 2 {
+			//done
+			continue
+		    }
+		    //for any additional points, draw them and connect with a line
+		    for j in 2..coords.len() {
+			let line_start = [coords[j-1].x,coords[j-1].y];
+			let line_end = [coords[j].x,coords[j].y];
+			overlay(&mut label_im,
+				&line_overlay(im_width,im_height,line_start,line_end,5,line_color),
+				0,0);
+			overlay(&mut label_im,&circle_overlay(im_width,im_height,10,
+							    line_end,line_color),0,0);
+		    }
+		}
+		//this frame should now be all labeled. concatenate to proc and save in our folder
+		let out_im = hcat_image(&[&proc.unwrap(),&label_im]);
+		let mut im_path = out_dir.clone();
+		im_path.push(format!("{}.png", framenum));
+		framenum += 1;
+		out_im.save(im_path).expect("couldn't save image");
+            }
+            Err(_) => {
+                break;
+            }
+        }
     }
 }
