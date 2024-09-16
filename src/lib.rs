@@ -132,14 +132,23 @@ fn line_overlay(
         if dist > line_weight.into() {
             false
         } else {
-            true
+            //only want to plot the line between the points, not infinite length
+            let mut x_sorted = [a[0], b[0]];
+            x_sorted.sort();
+            let mut y_sorted = [a[1], b[1]];
+            y_sorted.sort();
+            //is this pixel within a bounding box set by the points
+            (x_sorted[0] - line_weight < (x as u32))
+                && ((x as u32) < x_sorted[1]+line_weight)
+                && (y_sorted[0]-line_weight < (y as u32))
+                && ((y as u32) < y_sorted[1]+line_weight)
         }
     };
 
     RgbaImage::from_fn(width, height, |x, y| {
         if point_on_line(x.into(), y.into()) {
             //return an opaque pixel with color c
-            [c[1], c[2], c[3], 255].into()
+            [c[0], c[1], c[2], 255].into()
         } else {
             //return a transparent pixel
             [0, 0, 0, 0].into()
@@ -159,7 +168,7 @@ fn circle_overlay(width: u32, height: u32, r: u32, center: [u32; 2], c: [u8; 3])
     RgbaImage::from_fn(width, height, |x, y| {
         if point_in_circle(x.into(), y.into()) {
             //return an opaque pixel with color c
-            [c[1], c[2], c[3], 255].into()
+            [c[0], c[1], c[2], 255].into()
         } else {
             //return a transparent pixel
             [0, 0, 0, 0].into()
@@ -258,9 +267,13 @@ pub fn coords_to_df(oc: &[ObjCoords]) -> DataFrame {
 #[derive(Debug)]
 pub struct ObjPath {
     path: Vec<ObjCoords>,
+    err:f64,
+    pub v1:f64,
+    pub v2:f64
 }
 
 impl ObjPath {
+    /*
     ///Create a new `ObjPath`
     pub fn new() -> Self {
         ObjPath {
@@ -272,7 +285,11 @@ impl ObjPath {
     pub fn push(&mut self, point: ObjCoords) {
         self.path.push(point);
     }
-
+     */
+    ///Get the max error associated with this path
+    pub fn max_error(&self) -> f64 {
+	self.err
+    }
     ///Consume this object to get the underlying vector
     pub fn into_vec(self) -> Vec<ObjCoords> {
         self.path
@@ -314,15 +331,15 @@ pub fn track_paths(
             //if first_point is OnPath we don't need to worry about it
             //find the first index of our time_window (i.e., the first object to
             //have a timestamp greater than the object at cur_index
-            let mut win_min: usize = cur_index + 1;
-            for i in cur_index..objs.len() {
+            let mut win_min: usize = cur_index;
+            for i in (cur_index+1)..objs.len() {
                 let o = match &objs[i] {
                     PathStatus::OnPath(o) => o,
                     PathStatus::OffPath(o) => o,
                 };
                 if o.t == first_point.t {
                     //this point can't be our object as it's visible in the same frame
-                    cur_index += 1;
+                    //cur_index += 1;
                     continue;
                 } else {
                     win_min = i;
@@ -344,6 +361,7 @@ pub fn track_paths(
                 }
             }
             //now, for all unique combinations of objects in our window, which `min_points` set of objects is in the straightest line?
+	    println!("win_min:{}, win_max:{}, cur_index:{}",win_min,win_max,cur_index);
             let mut i_combos: Vec<_> = (win_min..win_max)
                 .filter(|i| {
                     //only interested in points not already on a path
@@ -445,7 +463,7 @@ pub fn track_paths(
             fits.sort_by(|p1, p2| {
                 if p1.max_error < p2.max_error {
                     Ordering::Less
-                } else if p1.max_error < p2.max_error {
+                } else if p1.max_error > p2.max_error {
                     Ordering::Greater
                 } else {
                     Ordering::Equal
@@ -456,15 +474,18 @@ pub fn track_paths(
                 continue;
             }
             if fits[0].max_error < tolerance.into() {
+		println!("found fit");
+		//println!("fits: {:?}",fits);
                 //Take the best fit, attempt to extend it, and add it to our output
                 let best_fit = &fits[0];
                 //create a new ObjPath to store everything in
-                let mut this_path = ObjPath::new();
+                let mut this_path_vec = Vec::<ObjCoords>::new();
+		let mut path_err:f64 = fits[0].max_error;
                 //mark first_point as OnPath and add to this_path
                 objs[cur_index] = PathStatus::OnPath(first_point.clone());
-                this_path.push(first_point.clone());
+                this_path_vec.push(first_point.clone());
                 //check all remaining points which are OffPath to see if they lie on this fit
-                for inner_index in cur_index + 1..objs.len() {
+                for inner_index in win_min + 1..objs.len() {
                     if let PathStatus::OffPath(p) = objs[inner_index].clone() {
                         //calculate where our fit would place a point at p.t
                         let t_prime = Into::<f64>::into(p.t - first_point.t);
@@ -478,11 +499,14 @@ pub fn track_paths(
                         //and mark it as OnPath
                         if err < tolerance.into() {
                             objs[inner_index] = PathStatus::OnPath(p.clone());
-                            this_path.push(p);
+                            this_path_vec.push(p);
+			    if err > path_err {
+				path_err = err
+			    }
                         }
                     }
                 }
-                paths.push(this_path);
+                paths.push(ObjPath{path:this_path_vec,err:path_err,v1:best_fit.v1,v2:best_fit.v2});
             }
         }
         cur_index += 1;
@@ -511,7 +535,7 @@ pub fn debug_images(
     min_points: usize,
     time_window: f32,
     tolerance: f32,
-) {
+) -> Vec<ObjPath> {
     //create our output directory
     let b = DirBuilder::new();
     b.create(&out_dir)
@@ -520,22 +544,24 @@ pub fn debug_images(
     let f = File::open(&recbudd_path).expect("couldn't open file");
     let mut reader = BufReader::new(f);
     let mut oc = Vec::<ObjCoords>::new();
+    let mut framenum = 1;
     loop {
         match ciborium::from_reader::<recbudd::RecFrame, &mut BufReader<File>>(&mut reader) {
             Ok(rec_frame) => {
-                let timestamp = rec_frame.get_timestamp();
+                //let timestamp = rec_frame.get_timestamp();
                 let im = rec_frame.to_image().into_luma8();
-                let (proc, cent_vec) =
+                let (_, cent_vec) =
                     find_objects(bg, &im, blur, threshold_value, min_obj_area, false);
                 let mut o: Vec<ObjCoords> = cent_vec
                     .into_iter()
                     .map(|c| ObjCoords {
                         x: c.0,
                         y: c.1,
-                        t: timestamp,
+                        t: framenum as f32,
                     })
                     .collect();
                 oc.append(&mut o);
+		framenum += 1;
             }
             Err(_) => {
                 break;
@@ -559,7 +585,7 @@ pub fn debug_images(
         .expect("couldn't rewind recbudd file");
     //now we will reprocess our frames, this time we will build debug output
     //we want a frame number
-    let mut framenum = 1;
+    let mut framenum = 1.0;
     loop {
         match ciborium::from_reader::<recbudd::RecFrame, &mut BufReader<File>>(&mut reader) {
             Ok(rec_frame) => {
@@ -568,64 +594,80 @@ pub fn debug_images(
                 let im_dyn = rec_frame.to_image();
                 let im = im_dyn.clone().into_luma8();
                 let mut label_im = im_dyn.into_rgba8();
-                let (proc, _) =
-                    find_objects(bg, &im, blur, threshold_value, min_obj_area, true);
-		//now we want to generate a new overlay on label_im which shows all the paths
-		//which are 'live' during this time
-		let live_path_indices = (0..paths.len()).filter(|i| {
-		    let this_path = &paths[*i];
-		    //test if this path contains points which occur at or before `timestamp`
-		    let starts_before = (*this_path).path.iter().any(|c| {
-			c.t < timestamp
-		    });
-		    //test if this path contains points which occur at or after `timestamp`
-		    let ends_after = (*this_path).path.iter().any(|c| {
-			c.t > timestamp
-		    });
-		    //this path is 'live' if...
-		    starts_before && ends_after
-		});
-		//now, for each live path, we want to draw points and lines connecting all
-		//coordinates that have happened up until now
-		let im_width = label_im.width();
-		let im_height = label_im.height();
-		for path_index in live_path_indices {
-		    //alternate what color we use
-		    let line_color = COLOR_PALETTE[path_index % COLOR_PALETTE.len()];
-		    let coords:Vec<_> = paths[path_index].path
-			.iter().filter(|coord| coord.t <= timestamp).collect();
-		    if coords.len()<1 {
-			//nothing to draw
-			continue
-		    }
-		    //draw the first point
-		    overlay(&mut label_im,&circle_overlay(im_width,im_height,10,
-							[coords[0].x,coords[0].y],line_color),0,0);
-		    if coords.len() < 2 {
-			//done
-			continue
-		    }
-		    //for any additional points, draw them and connect with a line
-		    for j in 2..coords.len() {
-			let line_start = [coords[j-1].x,coords[j-1].y];
-			let line_end = [coords[j].x,coords[j].y];
-			overlay(&mut label_im,
-				&line_overlay(im_width,im_height,line_start,line_end,5,line_color),
-				0,0);
-			overlay(&mut label_im,&circle_overlay(im_width,im_height,10,
-							    line_end,line_color),0,0);
-		    }
-		}
-		//this frame should now be all labeled. concatenate to proc and save in our folder
-		let out_im = hcat_image(&[&proc.unwrap(),&label_im]);
-		let mut im_path = out_dir.clone();
-		im_path.push(format!("{}.png", framenum));
-		framenum += 1;
-		out_im.save(im_path).expect("couldn't save image");
+                let (proc, _) = find_objects(bg, &im, blur, threshold_value, min_obj_area, true);
+                //now we want to generate a new overlay on label_im which shows all the paths
+                //which are 'live' during this time
+                let live_path_indices = (0..paths.len()).filter(|i| {
+                    let this_path = &paths[*i];
+                    //test if this path contains points which occur at or before `framenum`
+                    let starts_before = (*this_path).path.iter().any(|c| c.t <= framenum);
+                    //test if this path contains points which occur at or after `framenum`
+                    let ends_after = (*this_path).path.iter().any(|c| c.t >= framenum);
+                    //this path is 'live' if...
+                    starts_before && ends_after
+                });
+                //now, for each live path, we want to draw points and lines connecting all
+                //coordinates that have happened up until now
+                let im_width = label_im.width();
+                let im_height = label_im.height();
+                for path_index in live_path_indices {
+                    //alternate what color we use
+                    let line_color = COLOR_PALETTE[path_index % COLOR_PALETTE.len()];
+                    let coords: Vec<_> = paths[path_index]
+                        .path
+                        .iter()
+                        .filter(|coord| coord.t <= framenum)
+                        .collect();
+                    if coords.len() < 1 {
+                        //nothing to draw
+                        continue;
+                    }
+                    //draw the first point
+                    overlay(
+                        &mut label_im,
+                        &circle_overlay(
+                            im_width,
+                            im_height,
+                            10,
+                            [coords[0].x, coords[0].y],
+                            line_color,
+                        ),
+                        0,
+                        0,
+                    );
+                    if coords.len() < 2 {
+                        //done
+                        continue;
+                    }
+                    //for any additional points, draw them and connect with a line
+                    for j in 1..coords.len() {
+                        let line_start = [coords[j - 1].x, coords[j - 1].y];
+                        let line_end = [coords[j].x, coords[j].y];
+                        overlay(
+                            &mut label_im,
+                            &line_overlay(im_width, im_height, line_start, line_end, 5, line_color),
+                            0,
+                            0,
+                        );
+                        overlay(
+                            &mut label_im,
+                            &circle_overlay(im_width, im_height, 10, line_end, line_color),
+                            0,
+                            0,
+                        );
+                    }
+                }
+                //this frame should now be all labeled. concatenate to proc and save in our folder
+                let out_im = hcat_image(&[&proc.unwrap(), &label_im]);
+                let mut im_path = out_dir.clone();
+                im_path.push(format!("frame{}_time{}.png", framenum, timestamp));
+                framenum += 1.0;
+                out_im.save(im_path).expect("couldn't save image");
             }
             Err(_) => {
                 break;
             }
         }
     }
+    return paths;
 }

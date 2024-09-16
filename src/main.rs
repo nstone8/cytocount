@@ -1,12 +1,12 @@
 use ciborium;
 use clap::Parser;
-use cytocount::{coords_to_df, find_objects, track_paths, ObjCoords, ObjPath, PathStatus};
+use cytocount::{coords_to_df, debug_images};
 use imageproc::map::map_pixels;
 use papillae::ralston;
-use polars::prelude::{CsvWriter, SerWriter};
+use polars::prelude::*;
 use ralston::image::{ImageBuffer, Luma};
 use recbudd;
-use std::fs::{DirBuilder, File};
+use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 #[derive(Parser)]
@@ -22,7 +22,7 @@ struct MyArgs {
 
 fn main() {
     let args = MyArgs::parse();
-    let path = args.file_path;
+    let path = args.file_path.clone();
     let f = File::open(&path).expect("couldn't open file");
     let mut reader = BufReader::new(f);
     let mut dir = PathBuf::new();
@@ -31,8 +31,6 @@ fn main() {
         "{}_processed",
         path.file_name().unwrap().to_str().unwrap()
     ));
-    let b = DirBuilder::new();
-    b.create(&dir).expect("couldn't create image directory");
     //load all of our images into a vector
     let mut frame_vec = Vec::<ImageBuffer<Luma<u8>, Vec<u8>>>::new();
     //modify this loop to load the frames
@@ -61,44 +59,40 @@ fn main() {
             .unwrap();
         [this_pixel_average].into()
     });
-
-    let mut framenum = 1;
-    //loop here to process and save the frames
-    println!("processing frames");
-    let mut oc = Vec::<ObjCoords>::new();
-    for im in frame_vec {
-        let mut im_path = dir.clone();
-        im_path.push(format!("{}.png", framenum));
-        framenum += 1;
-        let (proc, cent_vec) =
-            find_objects(&bg, &im, args.blur, args.threshold, args.min_area, true);
-        proc.unwrap().save(im_path).expect("couldn't save image");
-        let mut o: Vec<ObjCoords> = cent_vec
-            .into_iter()
-            .map(|c| ObjCoords {
-                x: c.0,
-                y: c.1,
-                t: framenum as f32,
-            })
-            .collect();
-        oc.append(&mut o);
-    }
-    let mut df = coords_to_df(&oc);
-    let mut df_path = dir.clone();
-    df_path.push("centroids.csv");
-    let df_file = File::create(df_path).unwrap();
-    let mut cw = CsvWriter::new(df_file);
-    cw.finish(&mut df).unwrap();
-
-    let mut objs_pathstatus: Vec<PathStatus> =
-        oc.into_iter().map(|o| PathStatus::OffPath(o)).collect();
-    let mut paths = Vec::<ObjPath>::new();
-    let _ = track_paths(
-        &mut objs_pathstatus,
-        &mut paths,
+    println!("writing images");
+    let paths = debug_images(
+        args.file_path,
+        dir.clone(),
+        //find_objects args
+        &bg,
+        args.blur,
+        args.threshold,
+        args.min_area,
+        //track_paths args
         args.min_frames,
         args.time_window,
         args.tolerance,
     );
-    println!("paths: {:?}", paths);
+    let df_vec: Vec<LazyFrame> = paths
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+	    let path_error = p.max_error();
+	    let path_v1 = p.v1;
+	    let path_v2 = p.v2;
+            let this_df = coords_to_df(&p.into_vec()).lazy();
+            this_df.with_columns([lit(i as u32).alias("path_index"), lit(path_error).alias("max error"), lit(path_v1).alias("v1"), lit(path_v2).alias("v2")])
+        })
+        .collect();
+    let mut df_path = dir.clone();
+    df_path.push("paths.csv");
+    let df_file = File::create(df_path).unwrap();
+    let mut cw = CsvWriter::new(df_file);
+    cw.finish(
+        &mut concat(&df_vec, Default::default())
+            .expect("couldn't concatenate dataframes")
+            .collect()
+            .unwrap(),
+    )
+    .unwrap();
 }

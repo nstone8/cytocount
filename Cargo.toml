@@ -10,5 +10,5 @@ imageproc = "0.25.0"
 itertools = "0.13.0"
 moore_penrose = { git = "https://github.com/nstone8/moore_penrose", version = "0.1.0" }
 papillae = { git = "https://github.com/nstone8/papillae", version = "0.1.9" }
-polars = "0.41.3"
+polars = { version = "0.42.0", features = ["lazy"] }
 recbudd = { git = "https://github.com/nstone8/recbudd", version = "0.2.0" }
