@@ -2,11 +2,11 @@ use cytocount::*;
 
 fn main() {
     //(x,y,t)
-    let first_point = ObjCoords{x:30,y:20,t:2 as f32};
-    let oc:Vec<_> = [(32,32,3),
-	      (33,42,4),
-	      (32,50,5),
-	      (34,62,6)].iter().map(|c| {
+    let first_point = ObjCoords{x:91,y:21,t:1 as f32};
+    let oc:Vec<_> = [(90,154,2),
+		     (88,288,3),
+		     (87,422,4),
+		     (85,556,5)].iter().map(|c| {
 		  ObjCoords{x:c.0,y:c.1,t: c.2 as f32}
 	      }).collect();
     let fit = RegResult::fit_coords(&first_point,&oc);

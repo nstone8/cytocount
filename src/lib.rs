@@ -114,9 +114,13 @@ fn line_overlay(
 ) -> RgbaImage {
     //vector from a to b
     let v: Vec<f64> = a
-        .iter()
-        .zip(b.iter())
-        .map(|coords| (coords.1 - coords.0).into())
+        .into_iter()
+        .zip(b.into_iter())
+        .map(|coords|{
+	    let c0:f64 = coords.0.into();
+	    let c1:f64 = coords.1.into();
+	    c0 - c1
+	})
         .collect();
     //vector normal to v
     let n = [-v[1], v[0]];
@@ -323,10 +327,12 @@ impl RegResult {
             .map(|o| {
                 //we want to return a (t,x,y) tuple for the regression but normalized
                 //to first_point (i.e. with t0, x0 and y0 subtracted off
+		//have to convert to float before the subtraction so we don't end up with
+		//problems due to subtracting usize past 0
                 (
-                    TryInto::<f64>::try_into(o.t - first_point.t).unwrap(),
-                    TryInto::<f64>::try_into(o.x - first_point.x).unwrap(),
-                    TryInto::<f64>::try_into(o.y - first_point.y).unwrap(),
+		    TryInto::<f64>::try_into(o.t).unwrap() - TryInto::<f64>::try_into(first_point.t).unwrap(),
+		    TryInto::<f64>::try_into(o.x).unwrap() - TryInto::<f64>::try_into(first_point.x).unwrap(),
+		    TryInto::<f64>::try_into(o.y).unwrap() - TryInto::<f64>::try_into(first_point.y).unwrap(),
                 )
             })
             .collect();
@@ -661,6 +667,8 @@ pub fn debug_images(
                         .iter()
                         .filter(|coord| coord.t <= framenum)
                         .collect();
+		    //println!("path_index: {}, coords.len(): {}",path_index,coords.len());
+		    //println!("{:?}",coords);
                     if coords.len() < 1 {
                         //nothing to draw
                         continue;
