@@ -116,11 +116,11 @@ fn line_overlay(
     let v: Vec<f64> = a
         .into_iter()
         .zip(b.into_iter())
-        .map(|coords|{
-	    let c0:f64 = coords.0.into();
-	    let c1:f64 = coords.1.into();
-	    c0 - c1
-	})
+        .map(|coords| {
+            let c0: f64 = coords.0.into();
+            let c1: f64 = coords.1.into();
+            c0 - c1
+        })
         .collect();
     //vector normal to v
     let n = [-v[1], v[0]];
@@ -141,11 +141,15 @@ fn line_overlay(
             x_sorted.sort();
             let mut y_sorted = [a[1], b[1]];
             y_sorted.sort();
+            let line_weight_f = line_weight as f64;
+            //convert x_sorted and y_sorted to f64
+            let x_sorted_f: Vec<_> = x_sorted.into_iter().map(|k| k as f64).collect();
+            let y_sorted_f: Vec<_> = y_sorted.into_iter().map(|k| k as f64).collect();
             //is this pixel within a bounding box set by the points
-            (x_sorted[0] - line_weight < (x as u32))
-                && ((x as u32) < x_sorted[1] + line_weight)
-                && (y_sorted[0] - line_weight < (y as u32))
-                && ((y as u32) < y_sorted[1] + line_weight)
+            (x_sorted_f[0] - line_weight_f < x)
+                && (x < x_sorted_f[1] + line_weight_f)
+                && (y_sorted_f[0] - line_weight_f < y)
+                && (y < y_sorted_f[1] + line_weight_f)
         }
     };
 
@@ -327,12 +331,15 @@ impl RegResult {
             .map(|o| {
                 //we want to return a (t,x,y) tuple for the regression but normalized
                 //to first_point (i.e. with t0, x0 and y0 subtracted off
-		//have to convert to float before the subtraction so we don't end up with
-		//problems due to subtracting usize past 0
+                //have to convert to float before the subtraction so we don't end up with
+                //problems due to subtracting usize past 0
                 (
-		    TryInto::<f64>::try_into(o.t).unwrap() - TryInto::<f64>::try_into(first_point.t).unwrap(),
-		    TryInto::<f64>::try_into(o.x).unwrap() - TryInto::<f64>::try_into(first_point.x).unwrap(),
-		    TryInto::<f64>::try_into(o.y).unwrap() - TryInto::<f64>::try_into(first_point.y).unwrap(),
+                    TryInto::<f64>::try_into(o.t).unwrap()
+                        - TryInto::<f64>::try_into(first_point.t).unwrap(),
+                    TryInto::<f64>::try_into(o.x).unwrap()
+                        - TryInto::<f64>::try_into(first_point.x).unwrap(),
+                    TryInto::<f64>::try_into(o.y).unwrap()
+                        - TryInto::<f64>::try_into(first_point.y).unwrap(),
                 )
             })
             .collect();
@@ -667,8 +674,8 @@ pub fn debug_images(
                         .iter()
                         .filter(|coord| coord.t <= framenum)
                         .collect();
-		    //println!("path_index: {}, coords.len(): {}",path_index,coords.len());
-		    //println!("{:?}",coords);
+                    //println!("path_index: {}, coords.len(): {}",path_index,coords.len());
+                    //println!("{:?}",coords);
                     if coords.len() < 1 {
                         //nothing to draw
                         continue;
