@@ -77,11 +77,16 @@ fn main() {
         .into_iter()
         .enumerate()
         .map(|(i, p)| {
-	    let path_error = p.max_error();
-	    let path_v1 = p.v1;
-	    let path_v2 = p.v2;
+            let path_error = p.max_error();
+            let path_v1 = p.v1;
+            let path_v2 = p.v2;
             let this_df = coords_to_df(&p.into_vec()).lazy();
-            this_df.with_columns([lit(i as u32).alias("path_index"), lit(path_error).alias("max error"), lit(path_v1).alias("v1"), lit(path_v2).alias("v2")])
+            this_df.with_columns([
+                lit(i as u32).alias("path_index"),
+                lit(path_error).alias("max error"),
+                lit(path_v1).alias("v1"),
+                lit(path_v2).alias("v2"),
+            ])
         })
         .collect();
     let mut df_path = dir.clone();

@@ -139,9 +139,9 @@ fn line_overlay(
             y_sorted.sort();
             //is this pixel within a bounding box set by the points
             (x_sorted[0] - line_weight < (x as u32))
-                && ((x as u32) < x_sorted[1]+line_weight)
-                && (y_sorted[0]-line_weight < (y as u32))
-                && ((y as u32) < y_sorted[1]+line_weight)
+                && ((x as u32) < x_sorted[1] + line_weight)
+                && (y_sorted[0] - line_weight < (y as u32))
+                && ((y as u32) < y_sorted[1] + line_weight)
         }
     };
 
@@ -267,9 +267,9 @@ pub fn coords_to_df(oc: &[ObjCoords]) -> DataFrame {
 #[derive(Debug)]
 pub struct ObjPath {
     path: Vec<ObjCoords>,
-    err:f64,
-    pub v1:f64,
-    pub v2:f64
+    err: f64,
+    pub v1: f64,
+    pub v2: f64,
 }
 
 impl ObjPath {
@@ -288,7 +288,7 @@ impl ObjPath {
      */
     ///Get the max error associated with this path
     pub fn max_error(&self) -> f64 {
-	self.err
+        self.err
     }
     ///Consume this object to get the underlying vector
     pub fn into_vec(self) -> Vec<ObjCoords> {
@@ -305,11 +305,92 @@ pub enum PathStatus {
 
 ///Struct for organizing regression results
 #[derive(Debug)]
-struct RegResult {
+pub struct RegResult {
     v1: f64,
     v2: f64,
     //rms_error: f64,
     max_error: f64,
+    avg_error: f64,
+    first_point: ObjCoords,
+}
+
+impl RegResult {
+    ///Perform a linear fit of a series of points starting at 'first_point' and going through
+    ///`fit_coords`
+    pub fn fit_coords(first_point: &ObjCoords, fit_coords: &[ObjCoords]) -> RegResult {
+        let coords: Vec<_> = fit_coords
+            .iter()
+            .map(|o| {
+                //we want to return a (t,x,y) tuple for the regression but normalized
+                //to first_point (i.e. with t0, x0 and y0 subtracted off
+                (
+                    TryInto::<f64>::try_into(o.t - first_point.t).unwrap(),
+                    TryInto::<f64>::try_into(o.x - first_point.x).unwrap(),
+                    TryInto::<f64>::try_into(o.y - first_point.y).unwrap(),
+                )
+            })
+            .collect();
+        //build matrices for our least squares fit
+        //this will be a column vector of the timestamps
+        let nrows = coords.len();
+        let t: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
+            Dim::from_usize(nrows),
+            Dim::from_usize(1),
+            coords.clone().into_iter().map(|r| r.0),
+        );
+        let mut x: Vec<_> = coords.clone().into_iter().map(|r| r.1).collect();
+        let mut y: Vec<_> = coords.clone().into_iter().map(|r| r.2).collect();
+        //we want a matrix with x as the first column and y as the second
+        x.append(&mut y);
+        let xy_mat: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
+            Dim::from_usize(nrows),
+            Dim::from_usize(2),
+            x.into_iter(),
+        );
+        //now we can get our fit parameters v1 and v2 as a row vector by multiplying
+        //pinv(t) by xy_mat
+        let v_mat = pinv(t.clone()) * xy_mat.clone();
+        //check that this is the correct size
+        assert!(v_mat.nrows() == 1, "v_mat should be 1x2");
+        assert!(v_mat.ncols() == 2, "v_mat should be 1x2");
+        //grab our components
+        let v1 = v_mat[(0, 0)];
+        let v2 = v_mat[(0, 1)];
+        //we can now calculate the per-point error
+        let err_mat: OMatrix<f64, Dyn, Dyn> = xy_mat - t * v_mat;
+        //per point l2 norm (distance)
+        let l2_err: Vec<_> = err_mat
+            .row_iter()
+            .map(|r| (r[(0, 0)].powi(2) + r[(0, 1)].powi(2)).sqrt())
+            .collect();
+        let avg_error = l2_err.iter().sum::<f64>() / (l2_err.len() as f64);
+        let max_error = l2_err.into_iter().reduce(|e1, e2| e1.max(e2)).unwrap();
+        //let rms_error:f64 = l2_err.clone().into_iter().sum();
+
+        RegResult {
+            v1,
+            v2,
+            max_error,
+            avg_error,
+            first_point: first_point.clone(),
+        }
+    }
+    ///Get the predicted (x,y) coordinates of this fit at time `t`
+    pub fn predict_coords(&self, t: f32) -> (f64, f64) {
+        let t_prime = Into::<f64>::into(t - self.first_point.t);
+        let pred_x = Into::<f64>::into(self.first_point.x) + self.v1 * t_prime;
+        let pred_y = Into::<f64>::into(self.first_point.y) + self.v2 * t_prime;
+        (pred_x, pred_y)
+    }
+    ///Get the L2 error (distance) between `point` and this [RegResult]
+    pub fn get_error(&self, point: &ObjCoords) -> f64 {
+        //calculate where our fit would place a point at p.t
+        let (pred_x, pred_y) = self.predict_coords(point.t);
+        //calculate the error in terms of distance
+        ((pred_x - Into::<f64>::into(point.x)).powi(2)
+            + (pred_y - Into::<f64>::into(point.y)).powi(2))
+        .sqrt()
+    }
 }
 
 ///Divide a set of [ObjCoords] into paths and append them to `paths`
@@ -332,7 +413,7 @@ pub fn track_paths(
             //find the first index of our time_window (i.e., the first object to
             //have a timestamp greater than the object at cur_index
             let mut win_min: usize = cur_index;
-            for i in (cur_index+1)..objs.len() {
+            for i in (cur_index + 1)..objs.len() {
                 let o = match &objs[i] {
                     PathStatus::OnPath(o) => o,
                     PathStatus::OffPath(o) => o,
@@ -361,7 +442,7 @@ pub fn track_paths(
                 }
             }
             //now, for all unique combinations of objects in our window, which `min_points` set of objects is in the straightest line?
-	    println!("win_min:{}, win_max:{}, cur_index:{}",win_min,win_max,cur_index);
+            //println!("win_min:{}, win_max:{}, cur_index:{}",win_min,win_max,cur_index);
             let mut i_combos: Vec<_> = (win_min..win_max)
                 .filter(|i| {
                     //only interested in points not already on a path
@@ -405,6 +486,8 @@ pub fn track_paths(
             let mut fits: Vec<_> = i_combos
                 .into_iter()
                 .map(|c| {
+                    //println!("this combo {:?}",c);
+                    //convert our list of indices into a Vec of ObjCoords
                     let coords: Vec<_> = c
                         .iter()
                         .map(|i| {
@@ -414,50 +497,11 @@ pub fn track_paths(
                             let PathStatus::OffPath(o) = &objs[*i] else {
                                 panic!("we should have removed all OnPath entries");
                             };
-                            (
-                                TryInto::<f64>::try_into(o.t - first_point.t).unwrap(),
-                                TryInto::<f64>::try_into(o.x - first_point.x).unwrap(),
-                                TryInto::<f64>::try_into(o.y - first_point.y).unwrap(),
-                            )
+                            //println!("time diff: {}",o.t - first_point.t);
+                            return o.clone();
                         })
                         .collect();
-                    //build matrices for our least squares fit
-                    //this will be a column vector of the timestamps
-                    let nrows = coords.len();
-                    let t: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
-                        Dim::from_usize(nrows),
-                        Dim::from_usize(1),
-                        coords.clone().into_iter().map(|r| r.0),
-                    );
-                    let mut x: Vec<_> = coords.clone().into_iter().map(|r| r.1).collect();
-                    let mut y: Vec<_> = coords.clone().into_iter().map(|r| r.2).collect();
-                    //we want a matrix with x as the first column and y as the second
-                    x.append(&mut y);
-                    let xy_mat: OMatrix<f64, Dyn, Dyn> = OMatrix::from_iterator_generic(
-                        Dim::from_usize(nrows),
-                        Dim::from_usize(2),
-                        x.into_iter(),
-                    );
-                    //now we can get our fit parameters v1 and v2 as a row vector by multiplying
-                    //pinv(t) by xy_mat
-                    let v_mat = pinv(t.clone()) * xy_mat.clone();
-                    //check that this is the correct size
-                    assert!(v_mat.nrows() == 1, "v_mat should be 1x2");
-                    assert!(v_mat.ncols() == 2, "v_mat should be 1x2");
-                    //grab our components
-                    let v1 = v_mat[(0, 0)];
-                    let v2 = v_mat[(0, 1)];
-                    //we can now calculate the per-point error
-                    let err_mat: OMatrix<f64, Dyn, Dyn> = xy_mat - t * v_mat;
-                    //per point l2 norm (distance)
-                    let l2_err: Vec<_> = err_mat
-                        .row_iter()
-                        .map(|r| (r[(0, 0)].powi(2) + r[(0, 1)].powi(2)).sqrt())
-                        .collect();
-                    let max_error = l2_err.into_iter().reduce(|e1, e2| e1.max(e2)).unwrap();
-                    //let rms_error:f64 = l2_err.clone().into_iter().sum();
-
-                    RegResult { v1, v2, max_error }
+                    RegResult::fit_coords(&first_point, &coords)
                 })
                 .collect();
             fits.sort_by(|p1, p2| {
@@ -474,39 +518,38 @@ pub fn track_paths(
                 continue;
             }
             if fits[0].max_error < tolerance.into() {
-		println!("found fit");
-		//println!("fits: {:?}",fits);
+                //println!("found fit");
+                //println!("fits: {:?}",fits);
                 //Take the best fit, attempt to extend it, and add it to our output
                 let best_fit = &fits[0];
                 //create a new ObjPath to store everything in
                 let mut this_path_vec = Vec::<ObjCoords>::new();
-		let mut path_err:f64 = fits[0].max_error;
+                let mut path_err: f64 = 0.0;
                 //mark first_point as OnPath and add to this_path
                 objs[cur_index] = PathStatus::OnPath(first_point.clone());
                 this_path_vec.push(first_point.clone());
                 //check all remaining points which are OffPath to see if they lie on this fit
-                for inner_index in win_min + 1..objs.len() {
+                for inner_index in win_min..objs.len() {
                     if let PathStatus::OffPath(p) = objs[inner_index].clone() {
                         //calculate where our fit would place a point at p.t
-                        let t_prime = Into::<f64>::into(p.t - first_point.t);
-                        let pred_x = Into::<f64>::into(first_point.x) + best_fit.v1 * t_prime;
-                        let pred_y = Into::<f64>::into(first_point.y) + best_fit.v2 * t_prime;
-                        //calculate the error in terms of distance
-                        let err = ((pred_x - Into::<f64>::into(p.x)).powi(2)
-                            + (pred_y - Into::<f64>::into(p.y)).powi(2))
-                        .sqrt();
+                        let err = best_fit.get_error(&p);
                         //if this error is less than our tolerance, add this point to our paths
                         //and mark it as OnPath
                         if err < tolerance.into() {
                             objs[inner_index] = PathStatus::OnPath(p.clone());
                             this_path_vec.push(p);
-			    if err > path_err {
-				path_err = err
-			    }
+                            if err > path_err {
+                                path_err = err
+                            }
                         }
                     }
                 }
-                paths.push(ObjPath{path:this_path_vec,err:path_err,v1:best_fit.v1,v2:best_fit.v2});
+                paths.push(ObjPath {
+                    path: this_path_vec,
+                    err: path_err,
+                    v1: best_fit.v1,
+                    v2: best_fit.v2,
+                });
             }
         }
         cur_index += 1;
@@ -561,7 +604,7 @@ pub fn debug_images(
                     })
                     .collect();
                 oc.append(&mut o);
-		framenum += 1;
+                framenum += 1;
             }
             Err(_) => {
                 break;
